@@ -36,7 +36,13 @@ export async function verifyToken(token, secret) {
     const b64 = token.slice(0, lastDot);
     const sigHex = token.slice(lastDot + 1);
     const decoded = atob(b64);
-    const [email, expStr] = decoded.split('.')
+    // Use lastIndexOf so dotted emails (e.g. first.last@domain.com) are
+    // not truncated — the payload is `${email}.${exp}` and the expiry is
+    // always the last dot-separated segment.
+    const lastPayloadDot = decoded.lastIndexOf('.');
+    if (lastPayloadDot === -1) return null;
+    const email = decoded.slice(0, lastPayloadDot);
+    const expStr = decoded.slice(lastPayloadDot + 1);
     if (!email || !expStr) return null;
     const exp = parseInt(expStr, 10);
     if (!Number.isFinite(exp) || exp * 1000 < Date.now()) return null;

@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS waitlist (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL UNIQUE,
   source TEXT DEFAULT 'website',
+  -- Email digest frequency preference: 'daily' | 'weekly' | 'monthly'
+  frequency TEXT DEFAULT 'weekly',
   created_at TEXT NOT NULL,
   confirmed BOOLEAN DEFAULT 0,
   unsubscribed BOOLEAN DEFAULT 0,
@@ -19,7 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_waitlist_unsubscribed ON waitlist(unsubscribed);
 
 -- Stats view for quick analytics
 CREATE VIEW IF NOT EXISTS waitlist_stats AS
-SELECT 
+SELECT
   COUNT(*) as total_signups,
   SUM(CASE WHEN confirmed = 1 THEN 1 ELSE 0 END) as confirmed_count,
   SUM(CASE WHEN unsubscribed = 1 THEN 1 ELSE 0 END) as unsubscribed_count,
@@ -27,3 +29,13 @@ SELECT
   DATE(MAX(created_at)) as last_signup
 FROM waitlist;
 
+-- Rate limiting table — used by functions/lib/rateLimit.js
+-- Stores one row per signup attempt; old rows are cheap to leave in place
+-- (D1 is append-optimised) but you can prune them periodically if desired.
+CREATE TABLE IF NOT EXISTS rate_limits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ip TEXT NOT NULL,
+  attempted_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_limits_ip_time ON rate_limits(ip, attempted_at DESC);
