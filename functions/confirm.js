@@ -62,6 +62,11 @@ export async function onRequestGet({ request, env, waitUntil }) {
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({ from: `${fromName} <${fromEmail}>`, to: [email.toLowerCase()], subject, html, text })
+        }).then(async (res) => {
+          if (!res.ok) {
+            const txt = await res.text().catch(() => '');
+            console.error('Welcome email failed:', res.status, txt);
+          }
         }).catch((err) => console.error('Welcome email error:', err));
         // Use waitUntil so the CF Workers runtime doesn't kill the fetch
         // before it completes (fire-and-forget is not guaranteed otherwise).

@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS waitlist (
   email TEXT NOT NULL UNIQUE,
   source TEXT DEFAULT 'website',
   -- Email digest frequency preference: 'daily' | 'weekly' | 'monthly'
-  frequency TEXT DEFAULT 'weekly',
+  frequency TEXT DEFAULT 'weekly' CHECK (frequency IN ('daily', 'weekly', 'monthly')),
   created_at TEXT NOT NULL,
   confirmed BOOLEAN DEFAULT 0,
   unsubscribed BOOLEAN DEFAULT 0,

@@ -10,8 +10,16 @@ import { checkRateLimit } from '../lib/rateLimit.js';
 const VALID_FREQUENCIES = ['daily', 'weekly', 'monthly'];
 
 export async function onRequestPost({ request, env, waitUntil }) {
+  let body;
   try {
-    const body = await request.json();
+    body = await request.json();
+  } catch {
+    return new Response(JSON.stringify({ success: false, error: 'Invalid request body' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  try {
     const { email, source = 'website', turnstileToken } = body;
     const normalizedEmail = String(email || '').trim().toLowerCase();
     const frequency = VALID_FREQUENCIES.includes(body.frequency) ? body.frequency : 'weekly';
@@ -100,14 +108,13 @@ export async function onRequestPost({ request, env, waitUntil }) {
     }
 
     // Store in D1 database
-    const isDoubleOptIn = String(env.DOUBLE_OPT_IN || 'false').toLowerCase() === 'true';
-    const confirmedFlag = isDoubleOptIn ? 0 : 1;
+    const isOptIn = String(env.DOUBLE_OPT_IN || 'false').toLowerCase() === 'true';
+    const confirmedFlag = isOptIn ? 0 : 1;
     await db.prepare(
       'INSERT INTO waitlist (email, source, frequency, created_at, confirmed) VALUES (?, ?, ?, ?, ?)'
     ).bind(normalizedEmail, source, frequency, new Date().toISOString(), confirmedFlag).run();
 
     // Optional: Double opt-in email via Resend
-    const isOptIn = String(env.DOUBLE_OPT_IN || 'false').toLowerCase() === 'true';
     if (isOptIn && env.RESEND_API_KEY) {
       const { createToken } = await import('../lib/tokens.js');
       const { buildConfirmEmail } = await import('../lib/email.js');
@@ -162,6 +169,11 @@ export async function onRequestPost({ request, env, waitUntil }) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({ from: `${fromName} <${fromEmail}>`, to: [normalizedEmail], subject, html, text })
+      }).then(async (res) => {
+        if (!res.ok) {
+          const txt = await res.text().catch(() => '');
+          console.error('Welcome email failed:', res.status, txt);
+        }
       }).catch((err) => console.error('Welcome email error:', err));
       if (typeof waitUntil === 'function') waitUntil(p);
     }

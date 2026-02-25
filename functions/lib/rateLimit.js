@@ -28,6 +28,9 @@ export async function checkRateLimit(db, ip, opts = {}) {
       'INSERT INTO rate_limits (ip, attempted_at) VALUES (?, ?)'
     ).bind(ip, new Date().toISOString()).run();
 
+    // Lazy cleanup: prune rows older than 1 hour (fire-and-forget)
+    db.prepare("DELETE FROM rate_limits WHERE attempted_at < datetime('now', '-1 hour')").run().catch(() => {});
+
     return true;
   } catch {
     return true; // fail open on unexpected DB error

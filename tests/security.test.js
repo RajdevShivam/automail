@@ -74,6 +74,10 @@ function makeDb(rows = {}) {
               return store[email] ?? null;
             },
             async run() {
+              if (sql.includes('DELETE FROM rate_limits')) {
+                // Prune old entries from mock (no-op is fine for tests)
+                return;
+              }
               if (sql.includes('INSERT INTO rate_limits')) {
                 const [ip, attempted_at] = args;
                 rateLimits.push({ ip, attempted_at });
@@ -87,7 +91,10 @@ function makeDb(rows = {}) {
               }
               if (sql.includes('UPDATE waitlist SET confirmed')) {
                 const email = args[0];
-                if (store[email]) store[email].confirmed = 1;
+                if (store[email]) {
+                  store[email].confirmed = 1;
+                  store[email].unsubscribed = 0;
+                }
                 return;
               }
               if (sql.includes('UPDATE waitlist SET unsubscribed')) {
@@ -171,17 +178,18 @@ function makeSignupEnv(overrides = {}) {
 }
 
 test('honeypot: bot request (website field set) gets silent 200', async () => {
+  const env = makeSignupEnv();
   const req = makeRequest('https://example.com/api/signup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '1.2.3.4' },
     body: JSON.stringify({ email: 'bot@evil.com', website: 'http://spam.com' }),
   });
-  const res = await signupHandler({ request: req, env: makeSignupEnv(), waitUntil: () => {} });
+  const res = await signupHandler({ request: req, env, waitUntil: () => {} });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.success, true);
   // Verify nothing was written to DB
-  assert.equal(makeSignupEnv().D1._store['bot@evil.com'], undefined);
+  assert.equal(env.D1._store['bot@evil.com'], undefined);
 });
 
 test('honeypot: legitimate request (no website field) proceeds normally', async () => {
@@ -310,14 +318,35 @@ test('unsubscribe guard: active subscriber is unsubscribed', async () => {
 test('unsubscribe XSS: email is HTML-escaped in response body', async () => {
   // This test verifies that even if a crafted email somehow passed validation,
   // it would be safely escaped before being reflected into HTML.
-  // We test escHtml indirectly by triggering the already-unsubscribed path.
-  const email = 'user+tag@example.com'; // + and @ are safe but common edge cases
+  // We inject a crafted email with HTML metacharacters directly into the mock store,
+  // bypassing normal email validation, to directly test the escaping logic.
+  const email = 'user+tag@example.com'; // normal email for token creation
+  const craftedEmail = '<img onerror=x>@example.com'; // crafted email with HTML chars
   const token = await createToken(email, SECRET);
-  const env = makeUnsubEnv({ [email]: { confirmed: 1, unsubscribed: 0 } });
+  const env = makeUnsubEnv({ [craftedEmail]: { confirmed: 1, unsubscribed: 0 } });
+
+  // Manually verify the token to get the original email, then test with crafted email
+  // by directly querying the mock store with the crafted email
   const req = makeRequest(`https://example.com/unsubscribe?token=${encodeURIComponent(token)}`);
-  const res = await unsubscribeHandler({ request: req, env });
-  const text = await res.text();
-  // Email should appear literally in HTML without angle-bracket injection
-  assert.ok(text.includes('user+tag@example.com'));
-  assert.ok(!text.includes('<script'));
+
+  // Since we can't easily bypass token verification, we'll test by making the handler
+  // think the email in the token is the crafted one. We do this by modifying the
+  // verifyToken behavior through env. However, simpler: just directly test that
+  // if an email with HTML chars made it through, it would be escaped.
+  // We'll inject into the store with a safe token for a different email, then
+  // manually check the escaping would work by examining unsubscribe.js behavior.
+
+  // Better approach: inject a payload where the email contains HTML metacharacters
+  // and verify the response escapes them properly.
+  const xssEmail = '"onload=alert(1)"@example.com';
+  const xssToken = await createToken(xssEmail, SECRET);
+  const xssEnv = makeUnsubEnv({ [xssEmail]: { confirmed: 1, unsubscribed: 1 } }); // already unsubscribed
+  const xssReq = makeRequest(`https://example.com/unsubscribe?token=${encodeURIComponent(xssToken)}`);
+  const xssRes = await unsubscribeHandler({ request: xssReq, env: xssEnv });
+  const xssText = await xssRes.text();
+
+  // Verify HTML metacharacters are escaped, not rendered as HTML
+  assert.ok(xssText.includes('&quot;onload=alert(1)&quot;'), 'Double quotes should be escaped as &quot;');
+  assert.ok(!xssText.includes('"onload=alert(1)"'), 'Raw attribute syntax should not appear');
+  assert.ok(!xssText.includes('<script'), 'No unescaped script tags');
 });
