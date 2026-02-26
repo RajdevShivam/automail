@@ -16,17 +16,15 @@ export async function checkRateLimit(db, ip, opts = {}) {
   const windowStart = new Date(Date.now() - window * 1000).toISOString();
 
   try {
-    const { results } = await db.prepare(
-      'SELECT COUNT(*) as cnt FROM rate_limits WHERE ip = ? AND attempted_at > ?'
-    ).bind(ip, windowStart).all();
+    // Atomic check-and-insert: the INSERT only fires if the subquery count is
+    // below max, eliminating the SELECT/INSERT race under concurrent requests.
+    const now = new Date().toISOString();
+    const { meta } = await db.prepare(
+      'INSERT INTO rate_limits (ip, attempted_at) SELECT ?, ? WHERE (SELECT COUNT(*) FROM rate_limits WHERE ip = ? AND attempted_at > ?) < ?'
+    ).bind(ip, now, ip, windowStart, max).run();
 
-    const count = results[0]?.cnt ?? 0;
-    if (count >= max) return false;
-
-    // Record this attempt
-    await db.prepare(
-      'INSERT INTO rate_limits (ip, attempted_at) VALUES (?, ?)'
-    ).bind(ip, new Date().toISOString()).run();
+    // meta.changes === 0 means the subquery exceeded the limit and no row was inserted.
+    if (meta.changes === 0) return false;
 
     // Lazy cleanup: prune rows older than 1 hour (fire-and-forget).
     // Use a JS-computed cutoff in the same ISO format as the INSERTs so the

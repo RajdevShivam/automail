@@ -71,11 +71,16 @@ export async function onRequestPost({ request, env, waitUntil }) {
     }
 
     // IP rate limiting (requires D1 + rate_limits table — see schema/d1-schema.sql)
-    const allowed = await checkRateLimit(db, ip);
+    const rateLimitOpts = {
+      windowSeconds: env.RATE_LIMIT_WINDOW_SECONDS ? Number(env.RATE_LIMIT_WINDOW_SECONDS) : undefined,
+      maxRequests:   env.RATE_LIMIT_MAX           ? Number(env.RATE_LIMIT_MAX)            : undefined,
+    };
+    const allowed = await checkRateLimit(db, ip, rateLimitOpts);
     if (!allowed) {
+      const retryAfter = String(rateLimitOpts.windowSeconds ?? 3600);
       return new Response(JSON.stringify({ success: false, error: 'Too many requests. Please try again later.' }), {
         status: 429,
-        headers: { 'Content-Type': 'application/json', 'Retry-After': '3600' }
+        headers: { 'Content-Type': 'application/json', 'Retry-After': retryAfter }
       });
     }
 

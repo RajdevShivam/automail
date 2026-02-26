@@ -79,9 +79,14 @@ function makeDb(rows = {}) {
                 return;
               }
               if (sql.includes('INSERT INTO rate_limits')) {
-                const [ip, attempted_at] = args;
+                // args for the atomic INSERT...SELECT: [ip, now, ip, windowStart, max]
+                const [ip, attempted_at, , windowStart, max] = args;
+                const cnt = rateLimits.filter(
+                  (r) => r.ip === ip && r.attempted_at > windowStart
+                ).length;
+                if (cnt >= max) return { meta: { changes: 0 } };
                 rateLimits.push({ ip, attempted_at });
-                return;
+                return { meta: { changes: 1 } };
               }
               if (sql.includes('INSERT INTO waitlist')) {
                 // args: email, source, frequency, created_at, confirmed
@@ -97,7 +102,14 @@ function makeDb(rows = {}) {
                 }
                 return;
               }
+              if (sql.includes('UPDATE waitlist SET unsubscribed = 0')) {
+                // Re-subscribe: args are [confirmedFlag, created_at, frequency, email]
+                const [confirmed, , frequency, email] = args;
+                if (store[email]) { store[email].unsubscribed = 0; store[email].confirmed = confirmed; store[email].frequency = frequency; }
+                return;
+              }
               if (sql.includes('UPDATE waitlist SET unsubscribed')) {
+                // Unsubscribe: args are [email]
                 const email = args[0];
                 if (store[email]) store[email].unsubscribed = 1;
                 return;
@@ -349,4 +361,106 @@ test('unsubscribe XSS: email is HTML-escaped in response body', async () => {
   assert.ok(xssText.includes('&quot;onload=alert(1)&quot;'), 'Double quotes should be escaped as &quot;');
   assert.ok(!xssText.includes('"onload=alert(1)"'), 'Raw attribute syntax should not appear');
   assert.ok(!xssText.includes('<script'), 'No unescaped script tags');
+});
+
+// ---------------------------------------------------------------------------
+// 16–17  Signup input validation
+// ---------------------------------------------------------------------------
+
+test('signup: malformed JSON body returns 400', async () => {
+  const env = makeSignupEnv();
+  const req = makeRequest('https://example.com/api/signup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '1.2.3.4' },
+    body: 'not valid json {{{',
+  });
+  const res = await signupHandler({ request: req, env, waitUntil: () => {} });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.success, false);
+});
+
+test('signup: invalid email address returns 400', async () => {
+  const env = makeSignupEnv();
+  const req = makeRequest('https://example.com/api/signup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '1.2.3.4' },
+    body: JSON.stringify({ email: 'not-an-email' }),
+  });
+  const res = await signupHandler({ request: req, env, waitUntil: () => {} });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.success, false);
+  assert.equal(body.error, 'Invalid email address');
+});
+
+// ---------------------------------------------------------------------------
+// 18–20  Re-subscribe flow
+// ---------------------------------------------------------------------------
+
+test('signup: unsubscribed user can re-subscribe and is not treated as duplicate', async () => {
+  const env = makeSignupEnv({
+    D1: makeDb({ 'returning@example.com': { confirmed: 1, unsubscribed: 1 } }),
+  });
+  const req = makeRequest('https://example.com/api/signup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '9.9.9.9' },
+    body: JSON.stringify({ email: 'returning@example.com' }),
+  });
+  const res = await signupHandler({ request: req, env, waitUntil: () => {} });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.success, true);
+  // unsubscribed flag must be cleared
+  assert.equal(env.D1._store['returning@example.com'].unsubscribed, 0);
+});
+
+test('signup: re-subscribed user gets confirmed=1 when DOUBLE_OPT_IN is false', async () => {
+  const env = makeSignupEnv({
+    D1: makeDb({ 'returning@example.com': { confirmed: 1, unsubscribed: 1 } }),
+    DOUBLE_OPT_IN: 'false',
+  });
+  const req = makeRequest('https://example.com/api/signup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '9.9.9.9' },
+    body: JSON.stringify({ email: 'returning@example.com' }),
+  });
+  await signupHandler({ request: req, env, waitUntil: () => {} });
+  assert.equal(env.D1._store['returning@example.com'].confirmed, 1);
+  assert.equal(env.D1._store['returning@example.com'].unsubscribed, 0);
+});
+
+test('signup: active subscriber is told they are already on the waitlist', async () => {
+  const env = makeSignupEnv({
+    D1: makeDb({ 'active@example.com': { confirmed: 1, unsubscribed: 0 } }),
+  });
+  const req = makeRequest('https://example.com/api/signup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '9.9.9.9' },
+    body: JSON.stringify({ email: 'active@example.com' }),
+  });
+  const res = await signupHandler({ request: req, env, waitUntil: () => {} });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.success, true);
+  assert.equal(body.message, 'You are already on the waitlist!');
+  // DB must be unchanged — no extra rate-limit slot consumed
+  assert.equal(env.D1._rateLimits.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// 21  Confirm guard: unsubscribed user cannot be re-subscribed via old link
+// ---------------------------------------------------------------------------
+
+test('confirm guard: previously-unsubscribed user gets 200 (not re-subscribed)', async () => {
+  const email = 'unsub@example.com';
+  const token = await createToken(email, SECRET);
+  const env = makeConfirmEnv({ [email]: { confirmed: 1, unsubscribed: 1 } });
+  const req = makeRequest(`https://example.com/confirm?token=${encodeURIComponent(token)}`);
+  const res = await confirmHandler({ request: req, env, waitUntil: () => {} });
+  assert.equal(res.status, 200);
+  // Must NOT have cleared unsubscribed flag
+  assert.equal(env.D1._store[email].unsubscribed, 1);
+  const text = await res.text();
+  assert.ok(text.toLowerCase().includes('unsubscribed'));
 });
