@@ -55,10 +55,12 @@ export async function onRequestPost({ request, env, waitUntil }) {
     // Check for duplicate before rate-limit so returning users don't consume
     // a rate-limit slot and can't accidentally lock out their IP.
     const existing = await db.prepare(
-      'SELECT email FROM waitlist WHERE email = ?'
+      'SELECT email, unsubscribed FROM waitlist WHERE email = ?'
     ).bind(normalizedEmail).first();
 
-    if (existing) {
+    const isResubscribe = !!(existing?.unsubscribed);
+    if (existing && !isResubscribe) {
+      // Active or pending confirmation — nothing to do.
       return new Response(JSON.stringify({
         success: true,
         message: 'You are already on the waitlist!'
@@ -111,9 +113,17 @@ export async function onRequestPost({ request, env, waitUntil }) {
     // Store in D1 database
     const isOptIn = String(env.DOUBLE_OPT_IN || 'false').toLowerCase() === 'true';
     const confirmedFlag = isOptIn ? 0 : 1;
-    await db.prepare(
-      'INSERT INTO waitlist (email, source, frequency, created_at, confirmed) VALUES (?, ?, ?, ?, ?)'
-    ).bind(normalizedEmail, source, frequency, new Date().toISOString(), confirmedFlag).run();
+    if (isResubscribe) {
+      // Row exists but was unsubscribed — reset it so the email flows below
+      // (confirmation or welcome) treat them as a new subscriber.
+      await db.prepare(
+        'UPDATE waitlist SET unsubscribed = 0, confirmed = ?, created_at = ?, frequency = ? WHERE email = ?'
+      ).bind(confirmedFlag, new Date().toISOString(), frequency, normalizedEmail).run();
+    } else {
+      await db.prepare(
+        'INSERT INTO waitlist (email, source, frequency, created_at, confirmed) VALUES (?, ?, ?, ?, ?)'
+      ).bind(normalizedEmail, source, frequency, new Date().toISOString(), confirmedFlag).run();
+    }
 
     // Optional: Double opt-in email via Resend
     if (isOptIn && env.RESEND_API_KEY) {
