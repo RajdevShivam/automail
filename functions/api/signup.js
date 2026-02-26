@@ -33,17 +33,48 @@ export async function onRequestPost({ request, env, waitUntil }) {
       });
     }
 
-    // IP rate limiting (requires D1 + rate_limits table — see schema/d1-schema.sql)
+    // Validate email before any DB work
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(normalizedEmail)) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'Invalid email address'
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
     const db = env.D1 || env.DB;
-    if (db) {
-      const allowed = await checkRateLimit(db, ip);
-      if (!allowed) {
-        return new Response(JSON.stringify({ success: false, error: 'Too many requests. Please try again later.' }), {
-          status: 429,
-          headers: { 'Content-Type': 'application/json', 'Retry-After': '3600' }
-        });
-      }
+
+    if (!db) {
+      throw new Error('D1 binding not found (expected env.D1)');
+    }
+
+    // Check for duplicate before rate-limit so returning users don't consume
+    // a rate-limit slot and can't accidentally lock out their IP.
+    const existing = await db.prepare(
+      'SELECT email FROM waitlist WHERE email = ?'
+    ).bind(normalizedEmail).first();
+
+    if (existing) {
+      return new Response(JSON.stringify({
+        success: true,
+        message: 'You are already on the waitlist!'
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // IP rate limiting (requires D1 + rate_limits table — see schema/d1-schema.sql)
+    const allowed = await checkRateLimit(db, ip);
+    if (!allowed) {
+      return new Response(JSON.stringify({ success: false, error: 'Too many requests. Please try again later.' }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': '3600' }
+      });
     }
 
     // Optional: Verify Cloudflare Turnstile token if configured
@@ -75,36 +106,6 @@ export async function onRequestPost({ request, env, waitUntil }) {
           headers: { 'Content-Type': 'application/json' }
         });
       }
-    }
-
-    // Validate email
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(normalizedEmail)) {
-      return new Response(JSON.stringify({
-        success: false,
-        error: 'Invalid email address'
-      }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-
-    if (!db) {
-      throw new Error('D1 binding not found (expected env.D1)');
-    }
-    // Check if already exists
-    const existing = await db.prepare(
-      'SELECT email FROM waitlist WHERE email = ?'
-    ).bind(normalizedEmail).first();
-
-    if (existing) {
-      return new Response(JSON.stringify({
-        success: true,
-        message: 'You are already on the waitlist!'
-      }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' }
-      });
     }
 
     // Store in D1 database

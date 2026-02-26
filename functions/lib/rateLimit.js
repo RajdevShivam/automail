@@ -28,8 +28,12 @@ export async function checkRateLimit(db, ip, opts = {}) {
       'INSERT INTO rate_limits (ip, attempted_at) VALUES (?, ?)'
     ).bind(ip, new Date().toISOString()).run();
 
-    // Lazy cleanup: prune rows older than 1 hour (fire-and-forget)
-    db.prepare("DELETE FROM rate_limits WHERE attempted_at < datetime('now', '-1 hour')").run().catch(() => {});
+    // Lazy cleanup: prune rows older than 1 hour (fire-and-forget).
+    // Use a JS-computed cutoff in the same ISO format as the INSERTs so the
+    // lexicographic comparison is valid (SQLite datetime() uses a different
+    // format — space-separated, no Z — and would never match JS toISOString()).
+    const cutoff = new Date(Date.now() - window * 1000).toISOString();
+    db.prepare('DELETE FROM rate_limits WHERE attempted_at < ?').bind(cutoff).run().catch(() => {});
 
     return true;
   } catch {

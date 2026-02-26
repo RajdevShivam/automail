@@ -42,6 +42,14 @@ export async function onRequestGet({ request, env, waitUntil }) {
       return Response.redirect(`${base}/confirmed`, 302);
     }
 
+    if (row.unsubscribed) {
+      // User previously unsubscribed — don't silently re-subscribe via an old link.
+      return new Response('<h1>You have unsubscribed. Please sign up again if you wish to re-join.</h1>', {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }
+      });
+    }
+
     await db.prepare(
       'UPDATE waitlist SET confirmed = 1, unsubscribed = 0 WHERE email = ?'
     ).bind(email.toLowerCase()).run();
